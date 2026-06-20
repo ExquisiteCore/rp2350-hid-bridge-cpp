@@ -2,7 +2,67 @@
 
 Header-only C++17 SDK for the ExquisiteCore RP2350 KeyMouse Bridge.
 
-The protocol, key parser, and script parser are portable C++17. The serial client is currently implemented with the Windows Win32 serial API, so real device control expects a COM port such as `COM3`.
+The SDK implements the serial frame protocol, key parser, script parser, and a
+Windows serial client. It is used by the C++ vision runtime to send relative
+mouse movement and optional button commands to the RP2350 board.
+
+## Requirements
+
+```text
+C++17 compiler
+CMake 3.20+
+Windows for real serial-device control
+```
+
+The protocol and parser headers are portable C++17. The bundled serial client
+uses the Win32 serial API, so real device control expects a Windows COM port
+such as `COM3`.
+
+## Build And Test
+
+From this repository:
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+.\build\Release\test_protocol.exe
+```
+
+From the parent project:
+
+```powershell
+cd tools\rp2350_hid_bridge_cpp
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+.\build\Release\test_protocol.exe
+```
+
+Build outputs:
+
+```text
+build\Release\test_protocol.exe
+build\Release\basic_example.exe
+build\Release\script_example.exe
+```
+
+`test_protocol.exe` is safe and does not require hardware. Example executables
+only send real input when explicitly run against a COM port.
+
+## Use In CMake
+
+As a subdirectory:
+
+```cmake
+add_subdirectory(path/to/rp2350-hid-bridge-cpp)
+target_link_libraries(your_app PRIVATE rp2350_hid_bridge)
+```
+
+As a manually included header-only SDK:
+
+```cmake
+target_include_directories(your_app PRIVATE path/to/rp2350-hid-bridge-cpp/include)
+target_compile_features(your_app PRIVATE cxx_std_17)
+```
 
 ## Header Layout
 
@@ -12,28 +72,13 @@ Use the umbrella header for normal applications:
 #include "rp2350_hid_bridge.hpp"
 ```
 
-Focused headers are also available:
+Focused headers:
 
 ```cpp
 #include "rp2350_hid_bridge/protocol.hpp"
 #include "rp2350_hid_bridge/keys.hpp"
 #include "rp2350_hid_bridge/script.hpp"
 #include "rp2350_hid_bridge/serial.hpp"
-```
-
-## Use In CMake
-
-```cmake
-add_subdirectory(sdk/cpp)
-target_link_libraries(your_app PRIVATE rp2350_hid_bridge)
-```
-
-Build SDK tests and examples:
-
-```powershell
-cmake -S sdk/cpp -B sdk/cpp/build
-cmake --build sdk/cpp/build --config Debug
-sdk\cpp\build\Debug\test_protocol.exe
 ```
 
 ## Direct Control API
@@ -55,9 +100,18 @@ int main() {
 }
 ```
 
-Common key names include letters, digits, `ENTER`, `ESC`, `TAB`, `SPACE`, `F1`-`F12`, arrows, `HOME`, `END`, `PAGEUP`, `PAGEDOWN`, `DELETE`, `INSERT`, and punctuation names such as `SLASH`, `DOT`, `COMMA`, `BACKSLASH`.
+Common key names include letters, digits, `ENTER`, `ESC`, `TAB`, `SPACE`,
+`F1`-`F12`, arrows, `HOME`, `END`, `PAGEUP`, `PAGEDOWN`, `DELETE`, `INSERT`,
+and punctuation names such as `SLASH`, `DOT`, `COMMA`, `BACKSLASH`.
 
-Modifiers are combined with `+`: `CTRL+C`, `SHIFT+F5`, `ALT+TAB`, `WIN+R`.
+Modifiers are combined with `+`:
+
+```text
+CTRL+C
+SHIFT+F5
+ALT+TAB
+WIN+R
+```
 
 ## Script API
 
@@ -75,7 +129,7 @@ hid.open();
 hid.run_script(script);
 ```
 
-Supported commands:
+Supported script commands:
 
 ```text
 type "ASCII text"
@@ -90,13 +144,13 @@ stop
 Preview the bundled script without sending input:
 
 ```powershell
-sdk\cpp\build\Debug\script_example.exe
+.\build\Release\script_example.exe
 ```
 
-Send it intentionally on Windows:
+Send it intentionally:
 
 ```powershell
-sdk\cpp\build\Debug\script_example.exe --run COM3
+.\build\Release\script_example.exe --run COM3
 ```
 
 ## Protocol Helpers
@@ -113,4 +167,8 @@ auto commands = parse_script("key tap ENTER\n");
 auto packet = script_command_to_packet(commands.front());
 ```
 
-The examples produce real keyboard and mouse input only when explicitly run against a device. Make sure the active window is safe before sending commands.
+## Notes
+
+The SDK sends commands to the board. The board then emits standard USB HID
+keyboard and mouse reports. The SDK itself does not know which application is
+active, so run examples only when the active window is expected.
