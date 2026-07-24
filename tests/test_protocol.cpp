@@ -57,7 +57,23 @@ std::vector<std::uint8_t> response_frame(
 }
 
 class FakeTransport final : public SerialTransport {
+private:
+    class HeartbeatThreadExitRecorder {
+    public:
+        explicit HeartbeatThreadExitRecorder(FakeTransport* transport) : transport_(transport) {}
+        ~HeartbeatThreadExitRecorder() { transport_->on_heartbeat_thread_exit(); }
+
+    private:
+        FakeTransport* transport_;
+    };
+
 public:
+    enum class LifecycleEvent {
+        StopAllWritten,
+        HeartbeatThreadExited,
+        TransportClosed,
+    };
+
     void open(const std::string& port, std::uint32_t baud, std::uint32_t timeout_ms) override {
         std::lock_guard<std::mutex> lock(mutex_);
         port_ = port;
@@ -75,6 +91,9 @@ public:
 
     void write(const std::vector<std::uint8_t>& bytes) override {
         const auto frame = decode_frame(bytes);
+        if (frame.command_type == CommandType::Heartbeat) {
+            thread_local HeartbeatThreadExitRecorder heartbeat_thread_exit(this);
+        }
         {
             std::unique_lock<std::mutex> lock(mutex_);
             ++write_attempts_;
@@ -85,6 +104,10 @@ public:
             ++active_writes_;
             max_active_writes_ = std::max(max_active_writes_, active_writes_);
             writes_.push_back(bytes);
+            if (frame.command_type == CommandType::StopAll) {
+                lifecycle_events_.push_back(LifecycleEvent::StopAllWritten);
+                lifecycle_changed_.notify_all();
+            }
             writes_changed_.notify_all();
             if (block_command_ && frame.command_type == *block_command_) {
                 blocked_command_entered_ = true;
@@ -169,7 +192,35 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         closed_ = true;
         opened_ = false;
+        lifecycle_events_.push_back(LifecycleEvent::TransportClosed);
+        lifecycle_changed_.notify_all();
         reads_changed_.notify_all();
+    }
+
+    void gate_heartbeat_thread_exit() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        gate_heartbeat_thread_exit_ = true;
+        release_heartbeat_thread_exit_ = false;
+        heartbeat_thread_exit_entered_ = false;
+    }
+
+    bool wait_for_heartbeat_thread_exit(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return lifecycle_changed_.wait_for(
+            lock,
+            timeout,
+            [&] { return heartbeat_thread_exit_entered_; });
+    }
+
+    void release_heartbeat_thread_exit() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_heartbeat_thread_exit_ = true;
+        lifecycle_changed_.notify_all();
+    }
+
+    std::vector<LifecycleEvent> lifecycle_events() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lifecycle_events_;
     }
 
     void set_auto_ack(bool value, bool batch_aware = false) {
@@ -276,10 +327,22 @@ public:
     }
 
 private:
+    void on_heartbeat_thread_exit() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        heartbeat_thread_exit_entered_ = true;
+        lifecycle_changed_.notify_all();
+        if (gate_heartbeat_thread_exit_) {
+            lifecycle_changed_.wait(lock, [&] { return release_heartbeat_thread_exit_; });
+        }
+        lifecycle_events_.push_back(LifecycleEvent::HeartbeatThreadExited);
+        lifecycle_changed_.notify_all();
+    }
+
     mutable std::mutex mutex_;
     std::condition_variable writes_changed_;
     std::condition_variable reads_changed_;
     std::condition_variable block_changed_;
+    std::condition_variable lifecycle_changed_;
     std::string port_;
     std::uint32_t baud_ = 0;
     std::uint32_t configured_timeout_ms_ = 0;
@@ -305,6 +368,10 @@ private:
     std::optional<CommandType> block_command_;
     bool blocked_command_entered_ = false;
     bool release_blocked_command_ = false;
+    bool gate_heartbeat_thread_exit_ = false;
+    bool release_heartbeat_thread_exit_ = false;
+    bool heartbeat_thread_exit_entered_ = false;
+    std::vector<LifecycleEvent> lifecycle_events_;
 };
 
 HidBridgeOptions options(
@@ -571,6 +638,30 @@ void test_open_heartbeat_and_orderly_close() {
     CHECK(transport->writes().size() == writes_after_close);
 }
 
+void test_close_joins_heartbeat_before_transport_close() {
+    auto transport = std::make_shared<FakeTransport>();
+    HidBridge bridge(options(0, 100, 1), transport);
+    bridge.open();
+    CHECK(transport->wait_for_command(CommandType::Heartbeat, 1s));
+    transport->gate_heartbeat_thread_exit();
+
+    std::thread closing([&] { bridge.close(); });
+    const auto stop_all_seen = transport->wait_for_command(CommandType::StopAll, 1s);
+    const auto heartbeat_exit_entered = transport->wait_for_heartbeat_thread_exit(1s);
+    const auto closed_before_heartbeat_exit = transport->closed();
+    transport->release_heartbeat_thread_exit();
+    closing.join();
+
+    CHECK(stop_all_seen);
+    CHECK(heartbeat_exit_entered);
+    CHECK(!closed_before_heartbeat_exit);
+    CHECK(transport->lifecycle_events() == std::vector<FakeTransport::LifecycleEvent>({
+        FakeTransport::LifecycleEvent::StopAllWritten,
+        FakeTransport::LifecycleEvent::HeartbeatThreadExited,
+        FakeTransport::LifecycleEvent::TransportClosed,
+    }));
+}
+
 void test_command_and_heartbeat_writes_are_serialized() {
     auto transport = std::make_shared<FakeTransport>();
     transport->set_auto_ack(true);
@@ -670,6 +761,7 @@ int main() {
         test_duration_aware_deadlines();
         test_script_stop_segmentation_and_transaction_lock();
         test_open_heartbeat_and_orderly_close();
+        test_close_joins_heartbeat_before_transport_close();
         test_command_and_heartbeat_writes_are_serialized();
         test_close_preempts_active_command_and_stale_waiter();
         test_close_interrupts_busy_delay_without_retry();

@@ -5,6 +5,7 @@
 #include "rp2350_hid_bridge/script.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -223,7 +224,7 @@ public:
         session_ = std::make_shared<SessionData>();
         {
             std::lock_guard<std::mutex> heartbeat_lock(heartbeat_mutex_);
-            heartbeat_stop_ = false;
+            heartbeat_stop_.store(false, std::memory_order_release);
         }
         try {
             const auto generation = generation_;
@@ -254,7 +255,7 @@ public:
 
         {
             std::lock_guard<std::mutex> heartbeat_lock(heartbeat_mutex_);
-            heartbeat_stop_ = true;
+            heartbeat_stop_.store(true, std::memory_order_release);
         }
         heartbeat_changed_.notify_all();
         transport_->cancel_read();
@@ -265,15 +266,19 @@ public:
                 transport_->write(encode_frame(next_sequence(), CommandType::StopAll));
             } catch (...) {
             }
+        }
+
+        if (heartbeat_thread_.joinable() && heartbeat_thread_.get_id() != std::this_thread::get_id()) {
+            heartbeat_thread_.join();
+        }
+
+        {
+            std::lock_guard<std::mutex> write_lock(write_mutex_);
             try {
                 transport_->set_dtr(false);
             } catch (...) {
             }
             transport_->close();
-        }
-
-        if (heartbeat_thread_.joinable() && heartbeat_thread_.get_id() != std::this_thread::get_id()) {
-            heartbeat_thread_.join();
         }
         {
             std::lock_guard<std::mutex> state_lock(state_mutex_);
@@ -640,7 +645,7 @@ private:
         while (!heartbeat_changed_.wait_for(
             heartbeat_lock,
             std::chrono::milliseconds(options_.heartbeat_interval_ms),
-            [this] { return heartbeat_stop_; })) {
+            [this] { return heartbeat_stop_.load(std::memory_order_acquire); })) {
             heartbeat_lock.unlock();
             try {
                 write_frame(heartbeat, generation);
@@ -666,7 +671,7 @@ private:
 
     std::mutex heartbeat_mutex_;
     std::condition_variable heartbeat_changed_;
-    bool heartbeat_stop_ = true;
+    std::atomic<bool> heartbeat_stop_{true};
     std::thread heartbeat_thread_;
 };
 
