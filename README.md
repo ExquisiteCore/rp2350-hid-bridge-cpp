@@ -25,7 +25,7 @@ From this repository:
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
-.\build\Release\test_protocol.exe
+ctest --test-dir build -C Release --output-on-failure
 ```
 
 From the parent project:
@@ -34,7 +34,7 @@ From the parent project:
 cd tools\rp2350_hid_bridge_cpp
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
-.\build\Release\test_protocol.exe
+ctest --test-dir build -C Release --output-on-failure
 ```
 
 Build outputs:
@@ -113,6 +113,10 @@ ALT+TAB
 WIN+R
 ```
 
+Modifiers may also be sent without an ordinary key. For example,
+`key_down("SHIFT")` and `key_down("CTRL+SHIFT")` encode a zero keycode with
+the requested modifier mask. A combo may contain at most one ordinary key.
+
 ## Script API
 
 ```cpp
@@ -141,6 +145,11 @@ wait MILLISECONDS
 stop
 ```
 
+`stop` completes any preceding nonempty batch, sends `STOP_ALL`, and starts a
+new batch for following commands. A script containing only `stop` sends no
+empty batch. A script transaction is serialized so ordinary commands cannot
+interleave between `BATCH_BEGIN` and `BATCH_END`.
+
 Preview the bundled script without sending input:
 
 ```powershell
@@ -166,6 +175,34 @@ auto combo = parse_combo("CTRL+C");
 auto commands = parse_script("key tap ENTER\n");
 auto packet = script_command_to_packet(commands.front());
 ```
+
+## Protocol v2 Reliability
+
+Protocol v2 retries only response timeouts and `BUSY`. Each retry reuses the
+exact encoded frame and sequence number. The three-byte `BUSY` payload carries
+a reason byte followed by a big-endian retry delay in milliseconds, which the
+client honors. `NACK`, serial I/O errors, malformed `BUSY` responses, and
+unexpected response types are terminal. The receive stream is never purged;
+invalid or stale frames are skipped while the parser resynchronizes.
+
+Response deadlines include device execution time. Ordinary commands receive
+at least one second; waits include their requested duration plus transport
+margin; typing and split mouse movement use their estimated HID duration; and
+`BATCH_END` includes the accumulated duration of its batch.
+
+`HidBridge` accepts an injectable `SerialTransport`, allowing deterministic
+tests without a COM port or HID hardware. The bundled `Win32SerialTransport`
+is selected automatically by the normal port-based constructor.
+
+## Protocol v2 Safety Lease
+
+While open, the client sends a serialized sequence-zero `HEARTBEAT` frame with
+the `NO_RESPONSE` flag every 500 ms. Heartbeats share the write mutex and never
+read a response. Opening asserts DTR. Closing invalidates the current session,
+cancels an active read or `BUSY` delay, writes one best-effort preemptive
+`STOP_ALL`, stops the heartbeat worker, deasserts DTR, and closes the port.
+Queued commands from an old session cannot write after that stop or after a
+subsequent reopen.
 
 ## Notes
 

@@ -85,7 +85,7 @@ inline KeyCombo parse_combo(const std::string& input) {
         start = end + 1;
     }
 
-    if (!has_key) {
+    if (!has_key && combo.modifier == 0) {
         throw std::invalid_argument("combo has no key");
     }
     return combo;
