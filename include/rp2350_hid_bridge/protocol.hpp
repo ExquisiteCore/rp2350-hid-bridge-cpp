@@ -8,7 +8,9 @@
 
 namespace rp2350_hid_bridge {
 
-inline constexpr std::uint8_t PROTOCOL_VERSION = 1;
+inline constexpr std::uint8_t LEGACY_PROTOCOL_VERSION = 1;
+inline constexpr std::uint8_t PROTOCOL_VERSION = 2;
+inline constexpr std::uint8_t FLAG_NO_RESPONSE = 0x01;
 inline constexpr std::uint8_t MAGIC0 = 0xA5;
 inline constexpr std::uint8_t MAGIC1 = 0x5A;
 inline constexpr std::size_t MAX_PAYLOAD_SIZE = 240;
@@ -20,6 +22,7 @@ enum class CommandType : std::uint8_t {
     Ping = 0x01,
     GetInfo = 0x02,
     GetCaps = 0x03,
+    Heartbeat = 0x04,
     KeyDown = 0x10,
     KeyUp = 0x11,
     KeyTap = 0x12,
@@ -55,6 +58,8 @@ struct Response {
     CommandType command_type = CommandType::Ack;
     std::vector<std::uint8_t> payload;
     std::uint16_t sequence = 0;
+    std::uint8_t version = 0;
+    std::uint8_t flags = 0;
 };
 
 inline std::uint16_t crc16_ccitt_false(
@@ -86,7 +91,9 @@ inline std::uint16_t read_u16(const std::vector<std::uint8_t>& bytes, std::size_
 inline std::vector<std::uint8_t> encode_frame(
     std::uint16_t sequence,
     CommandType command_type,
-    const std::vector<std::uint8_t>& payload = {}) {
+    const std::vector<std::uint8_t>& payload = {},
+    std::uint8_t flags = 0,
+    std::uint8_t version = PROTOCOL_VERSION) {
     if (payload.size() > MAX_PAYLOAD_SIZE) {
         throw std::invalid_argument("payload too long");
     }
@@ -94,8 +101,8 @@ inline std::vector<std::uint8_t> encode_frame(
     std::vector<std::uint8_t> out(FRAME_OVERHEAD + payload.size());
     out[0] = MAGIC0;
     out[1] = MAGIC1;
-    out[2] = PROTOCOL_VERSION;
-    out[3] = 0;
+    out[2] = version;
+    out[3] = flags;
     write_u16(out, 4, sequence);
     out[6] = static_cast<std::uint8_t>(command_type);
     write_u16(out, 7, static_cast<std::uint16_t>(payload.size()));
