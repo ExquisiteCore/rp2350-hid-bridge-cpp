@@ -71,6 +71,7 @@ public:
     enum class LifecycleEvent {
         StopAllWritten,
         HeartbeatThreadExited,
+        CancelledReadExited,
         TransportClosed,
     };
 
@@ -172,6 +173,13 @@ public:
         reads_changed_.notify_all();
         if (block_reads_) {
             reads_changed_.wait(lock, [&] { return cancelled_ || closed_; });
+            if (hold_cancelled_read_ && cancelled_) {
+                cancelled_read_held_ = true;
+                reads_changed_.notify_all();
+                reads_changed_.wait(lock, [&] { return release_cancelled_read_; });
+                lifecycle_events_.push_back(LifecycleEvent::CancelledReadExited);
+                lifecycle_changed_.notify_all();
+            }
         }
         if (cancelled_ || receive_buffer_.empty()) {
             return {};
@@ -238,6 +246,25 @@ public:
     void set_block_reads(bool value) {
         std::lock_guard<std::mutex> lock(mutex_);
         block_reads_ = value;
+    }
+
+    void hold_cancelled_read() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        block_reads_ = true;
+        hold_cancelled_read_ = true;
+        cancelled_read_held_ = false;
+        release_cancelled_read_ = false;
+    }
+
+    bool wait_for_cancelled_read(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return reads_changed_.wait_for(lock, timeout, [&] { return cancelled_read_held_; });
+    }
+
+    void release_cancelled_read() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_cancelled_read_ = true;
+        reads_changed_.notify_all();
     }
 
     void set_write_delay(std::uint32_t milliseconds) {
@@ -353,6 +380,9 @@ private:
     bool batch_aware_ = false;
     bool collecting_ = false;
     bool block_reads_ = false;
+    bool hold_cancelled_read_ = false;
+    bool cancelled_read_held_ = false;
+    bool release_cancelled_read_ = false;
     bool read_entered_ = false;
     bool fail_next_write_ = false;
     int read_calls_ = 0;
@@ -579,11 +609,16 @@ void test_script_stop_segmentation_and_transaction_lock() {
         HidBridge bridge(options(), transport);
         bridge.open();
         std::vector<std::string> errors;
+        std::mutex errors_mutex;
+        const auto record_error = [&](const std::exception& error) {
+            std::lock_guard<std::mutex> lock(errors_mutex);
+            errors.push_back(error.what());
+        };
         std::thread script_thread([&] {
             try {
                 bridge.run_script("type \"abc\"\n");
             } catch (const std::exception& error) {
-                errors.push_back(error.what());
+                record_error(error);
             }
         });
         CHECK(transport->wait_for_blocked_command(1s));
@@ -591,7 +626,7 @@ void test_script_stop_segmentation_and_transaction_lock() {
             try {
                 bridge.ping();
             } catch (const std::exception& error) {
-                errors.push_back(error.what());
+                record_error(error);
             }
         });
         std::this_thread::sleep_for(20ms);
@@ -717,6 +752,77 @@ void test_close_preempts_active_command_and_stale_waiter() {
     bridge.close();
 }
 
+void test_close_waits_for_cancelled_read_before_transport_close_and_reopen() {
+    auto transport = std::make_shared<FakeTransport>();
+    HidBridge bridge(options(0, 100), transport);
+    bridge.open();
+    transport->hold_cancelled_read();
+
+    std::atomic<bool> command_failed{false};
+    std::thread command([&] {
+        try {
+            bridge.wait_ms(60'000);
+        } catch (...) {
+            command_failed = true;
+        }
+    });
+    CHECK(transport->wait_for_read(1s));
+
+    std::mutex close_mutex;
+    std::condition_variable close_changed;
+    bool close_finished = false;
+    std::thread closing([&] {
+        bridge.close();
+        {
+            std::lock_guard<std::mutex> lock(close_mutex);
+            close_finished = true;
+        }
+        close_changed.notify_all();
+    });
+
+    const auto cancelled_read_held = transport->wait_for_cancelled_read(1s);
+    const auto stop_all_seen = transport->wait_for_command(CommandType::StopAll, 1s);
+    bool close_finished_before_release = false;
+    {
+        std::unique_lock<std::mutex> lock(close_mutex);
+        close_finished_before_release = close_changed.wait_for(lock, 500ms, [&] {
+            return close_finished;
+        });
+    }
+    const auto closed_before_release = transport->closed();
+    const auto dtr_before_release = transport->dtr_history();
+    auto reopen_succeeded_before_release = false;
+    try {
+        bridge.open();
+        reopen_succeeded_before_release = true;
+    } catch (const std::runtime_error&) {
+    }
+
+    transport->release_cancelled_read();
+    command.join();
+    closing.join();
+    const auto shutdown_events = transport->lifecycle_events();
+
+    CHECK(cancelled_read_held);
+    CHECK(stop_all_seen);
+    CHECK(!close_finished_before_release);
+    CHECK(!closed_before_release);
+    CHECK(dtr_before_release == std::vector<bool>({true}));
+    CHECK(!reopen_succeeded_before_release);
+    CHECK(command_failed);
+    CHECK(shutdown_events == std::vector<FakeTransport::LifecycleEvent>({
+        FakeTransport::LifecycleEvent::StopAllWritten,
+        FakeTransport::LifecycleEvent::CancelledReadExited,
+        FakeTransport::LifecycleEvent::TransportClosed,
+    }));
+
+    transport->set_block_reads(false);
+    transport->set_auto_ack(true);
+    bridge.open();
+    bridge.ping();
+    bridge.close();
+}
+
 void test_close_interrupts_busy_delay_without_retry() {
     auto transport = std::make_shared<FakeTransport>();
     transport->set_scripted_responses(
@@ -764,6 +870,7 @@ int main() {
         test_close_joins_heartbeat_before_transport_close();
         test_command_and_heartbeat_writes_are_serialized();
         test_close_preempts_active_command_and_stale_waiter();
+        test_close_waits_for_cancelled_read_before_transport_close_and_reopen();
         test_close_interrupts_busy_delay_without_retry();
         test_close_is_best_effort_when_stop_write_fails();
         std::cout << "C++ SDK protocol v2 tests passed\n";

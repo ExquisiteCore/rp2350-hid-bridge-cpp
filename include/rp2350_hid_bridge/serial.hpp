@@ -273,6 +273,11 @@ public:
         }
 
         {
+            std::unique_lock<std::mutex> state_lock(state_mutex_);
+            active_commands_changed_.wait(state_lock, [this] { return active_commands_ == 0; });
+        }
+
+        {
             std::lock_guard<std::mutex> write_lock(write_mutex_);
             try {
                 transport_->set_dtr(false);
@@ -349,6 +354,18 @@ private:
         std::optional<std::uint64_t> batch_duration_ms;
     };
 
+    class ActiveCommandGuard {
+    public:
+        explicit ActiveCommandGuard(HidBridge& bridge) noexcept : bridge_(bridge) {}
+        ~ActiveCommandGuard() { bridge_.finish_active_command(); }
+
+        ActiveCommandGuard(const ActiveCommandGuard&) = delete;
+        ActiveCommandGuard& operator=(const ActiveCommandGuard&) = delete;
+
+    private:
+        HidBridge& bridge_;
+    };
+
     static HidBridgeOptions make_options(
         std::string port,
         std::uint32_t baud,
@@ -375,6 +392,23 @@ private:
         return session_;
     }
 
+    std::shared_ptr<SessionData> begin_active_command(std::uint64_t generation) {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        if (generation != generation_ || !opened_ || closing_ || !session_) {
+            throw std::runtime_error("serial session changed or is closing");
+        }
+        ++active_commands_;
+        return session_;
+    }
+
+    void finish_active_command() noexcept {
+        {
+            std::lock_guard<std::mutex> state_lock(state_mutex_);
+            --active_commands_;
+        }
+        active_commands_changed_.notify_all();
+    }
+
     void ensure_generation(std::uint64_t generation) const {
         (void)require_session(generation);
     }
@@ -384,7 +418,8 @@ private:
         const std::vector<std::uint8_t>& payload,
         std::uint64_t generation) {
         std::lock_guard<std::recursive_mutex> transaction_lock(command_mutex_);
-        auto session = require_session(generation);
+        auto session = begin_active_command(generation);
+        ActiveCommandGuard active_command(*this);
         const auto sequence = next_sequence();
         const auto frame = encode_frame(sequence, command, payload);
         const auto timeout_ms = response_timeout(command, payload, *session);
@@ -663,6 +698,8 @@ private:
     bool closing_ = false;
     std::uint64_t generation_ = 0;
     std::shared_ptr<SessionData> session_;
+    std::size_t active_commands_ = 0;
+    std::condition_variable active_commands_changed_;
 
     std::recursive_mutex command_mutex_;
     std::mutex write_mutex_;
