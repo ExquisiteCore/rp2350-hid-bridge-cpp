@@ -505,6 +505,24 @@ void test_script_parser() {
 
 void test_retry_policy_and_response_parser() {
     {
+        const std::vector<std::uint8_t> codes = {0x04, 0x05, 0x06};
+        const std::vector<std::string> names = {
+            "HID write failure",
+            "transport failure",
+            "frame too long",
+        };
+        for (std::size_t index = 0; index < codes.size(); ++index) {
+            auto transport = std::make_shared<FakeTransport>();
+            transport->set_scripted_responses(
+                {response_frame(1, CommandType::Nack, {codes[index]})});
+            HidBridge bridge(options(), transport);
+            bridge.open();
+            const auto message = expect_runtime_error([&] { bridge.key_down("W"); });
+            CHECK(message.find(names[index]) != std::string::npos);
+        }
+    }
+
+    {
         auto transport = std::make_shared<FakeTransport>();
         transport->set_scripted_responses({response_frame(1, CommandType::Nack, {0x0F})});
         HidBridge bridge(options(3), transport);

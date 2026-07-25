@@ -582,6 +582,9 @@ private:
             case 1: name = "bad frame"; break;
             case 2: name = "bad command"; break;
             case 3: name = "unsupported ASCII"; break;
+            case 4: name = "HID write failure"; break;
+            case 5: name = "transport failure"; break;
+            case 6: name = "frame too long"; break;
             case 7: name = "unsupported version"; break;
             case 8: name = "unsupported flags"; break;
             case 9: name = "invalid sequence"; break;
