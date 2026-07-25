@@ -198,11 +198,24 @@ is selected automatically by the normal port-based constructor.
 
 While open, the client sends a serialized sequence-zero `HEARTBEAT` frame with
 the `NO_RESPONSE` flag every 500 ms. Heartbeats share the write mutex and never
-read a response. Opening asserts DTR. Closing invalidates the current session,
-cancels an active read or `BUSY` delay, writes one best-effort preemptive
-`STOP_ALL`, stops the heartbeat worker, deasserts DTR, and closes the port.
-Queued commands from an old session cannot write after that stop or after a
-subsequent reopen.
+read a response. Opening asserts DTR. Loss of the process, serial connection,
+or heartbeats lets the firmware's two-second control lease release held input.
+
+## Concurrency And Session Lifecycle
+
+All commands and scripts share one recursive command mutex, so only one
+request/response exchange is active at a time and an ordinary command cannot
+interleave with a script transaction. `run_script()` captures the current
+session generation and checks it throughout every batch segment. Closing or
+reopening the bridge therefore aborts an old queued script instead of allowing
+its remaining commands to continue through the new connection.
+
+`close()` marks the bridge as closing, invalidates the current generation,
+stops future heartbeat writes, cancels an active read or `BUSY` delay, and
+writes one best-effort preemptive `STOP_ALL`. It then joins the heartbeat
+worker, waits for every active command to leave the transport, deasserts DTR,
+and closes the port. This ordering prevents command or heartbeat writes after
+the stop and keeps an old session from affecting a subsequent reopen.
 
 ## Notes
 
