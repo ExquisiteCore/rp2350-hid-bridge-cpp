@@ -21,7 +21,7 @@ Windows for real serial-device control
 在本 SDK 仓库中执行：
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake -S . -B build
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
@@ -30,7 +30,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 ```powershell
 cd tools\rp2350_hid_bridge_cpp
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake -S . -B build
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
