@@ -165,9 +165,11 @@ struct HidBridgeOptions {
     std::uint32_t heartbeat_interval_ms = 500;
 };
 
-class HidBridge {
+namespace detail {
+
+class HidBridgeCore {
 public:
-    explicit HidBridge(
+    explicit HidBridgeCore(
         HidBridgeOptions options,
         std::shared_ptr<SerialTransport> transport = nullptr)
         : options_(std::move(options)), transport_(std::move(transport)) {
@@ -186,17 +188,17 @@ public:
         }
     }
 
-    explicit HidBridge(
+    explicit HidBridgeCore(
         std::string port,
         std::uint32_t baud = 115200,
         std::uint32_t timeout_ms = 1000,
         int retries = 2)
-        : HidBridge(make_options(std::move(port), baud, timeout_ms, retries)) {}
+        : HidBridgeCore(make_options(std::move(port), baud, timeout_ms, retries)) {}
 
-    HidBridge(const HidBridge&) = delete;
-    HidBridge& operator=(const HidBridge&) = delete;
+    HidBridgeCore(const HidBridgeCore&) = delete;
+    HidBridgeCore& operator=(const HidBridgeCore&) = delete;
 
-    ~HidBridge() { close(); }
+    ~HidBridgeCore() { close(); }
 
     void open() {
         std::lock_guard<std::mutex> state_lock(state_mutex_);
@@ -356,14 +358,14 @@ private:
 
     class ActiveCommandGuard {
     public:
-        explicit ActiveCommandGuard(HidBridge& bridge) noexcept : bridge_(bridge) {}
+        explicit ActiveCommandGuard(HidBridgeCore& bridge) noexcept : bridge_(bridge) {}
         ~ActiveCommandGuard() { bridge_.finish_active_command(); }
 
         ActiveCommandGuard(const ActiveCommandGuard&) = delete;
         ActiveCommandGuard& operator=(const ActiveCommandGuard&) = delete;
 
     private:
-        HidBridge& bridge_;
+        HidBridgeCore& bridge_;
     };
 
     static HidBridgeOptions make_options(
@@ -714,5 +716,9 @@ private:
     std::atomic<bool> heartbeat_stop_{true};
     std::thread heartbeat_thread_;
 };
+
+}  // namespace detail
+
+using HidBridge = detail::HidBridgeCore;
 
 }  // namespace rp2350_hid_bridge
