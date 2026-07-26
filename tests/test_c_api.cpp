@@ -46,6 +46,9 @@ std::string last_error() {
 
 void test_abi_info() {
     CHECK(rp2350_hid_get_abi_info(nullptr) == RP2350_HID_STATUS_ERROR);
+    CHECK(
+        last_error().find("RP2350 protocol v2 capabilities are required") !=
+        std::string::npos);
     Rp2350HidAbiInfo info{};
     info.struct_size = sizeof(info);
     CHECK(rp2350_hid_get_abi_info(&info) == RP2350_HID_STATUS_OK);

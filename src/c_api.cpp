@@ -16,6 +16,8 @@
 namespace {
 
 thread_local std::string last_error;
+constexpr const char* kProtocolV2Requirement =
+    "RP2350 protocol v2 capabilities are required";
 
 template <typename Function>
 std::int32_t call_api(Function&& function) noexcept {
@@ -132,7 +134,8 @@ extern "C" {
 std::int32_t rp2350_hid_get_abi_info(Rp2350HidAbiInfo* info) {
     return call_api([&] {
         if (info == nullptr) {
-            throw std::invalid_argument("ABI info is null");
+            throw std::invalid_argument(
+                std::string(kProtocolV2Requirement) + ": ABI info is null");
         }
         if (info->struct_size != sizeof(Rp2350HidAbiInfo)) {
             throw std::invalid_argument("ABI info struct_size is incompatible");
