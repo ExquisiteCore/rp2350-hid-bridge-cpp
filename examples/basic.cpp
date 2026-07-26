@@ -1,10 +1,21 @@
 #include <iomanip>
 #include <iostream>
+#include <string_view>
 
 #include "rp2350_hid_bridge.hpp"
+#include "rp2350_hid_bridge/c_api.h"
 
-int main() {
+int main(int argc, char** argv) {
     using namespace rp2350_hid_bridge;
+
+    if (argc == 2 && std::string_view(argv[1]) == "--abi-smoke") {
+        Rp2350HidAbiInfo info{};
+        info.struct_size = sizeof(info);
+        return rp2350_hid_get_abi_info(&info) == RP2350_HID_STATUS_OK &&
+                       info.abi_major == RP2350_HID_ABI_MAJOR
+                   ? 0
+                   : 1;
+    }
 
 #ifdef _WIN32
     HidBridge hid("COM3");

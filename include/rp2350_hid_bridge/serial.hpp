@@ -34,6 +34,11 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+class TransportError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 /// Injectable byte transport used by HidBridge. Tests can provide a fake;
 /// production Windows callers use Win32SerialTransport.
 class SerialTransport {
@@ -64,21 +69,21 @@ public:
             0,
             nullptr);
         if (handle_ == INVALID_HANDLE_VALUE) {
-            throw std::runtime_error("failed to open serial port " + port);
+            throw TransportError("failed to open serial port " + port);
         }
 
         try {
             DCB dcb{};
             dcb.DCBlength = sizeof(dcb);
             if (!GetCommState(handle_, &dcb)) {
-                throw std::runtime_error("GetCommState failed");
+                throw TransportError("GetCommState failed");
             }
             dcb.BaudRate = baud;
             dcb.ByteSize = 8;
             dcb.Parity = NOPARITY;
             dcb.StopBits = ONESTOPBIT;
             if (!SetCommState(handle_, &dcb)) {
-                throw std::runtime_error("SetCommState failed");
+                throw TransportError("SetCommState failed");
             }
             set_timeouts(timeout_ms);
         } catch (...) {
@@ -90,7 +95,7 @@ public:
     void set_dtr(bool asserted) override {
         require_open();
         if (!EscapeCommFunction(handle_, asserted ? SETDTR : CLRDTR)) {
-            throw std::runtime_error("serial DTR control failed");
+            throw TransportError("serial DTR control failed");
         }
     }
 
@@ -101,7 +106,7 @@ public:
             DWORD written = 0;
             const auto remaining = static_cast<DWORD>(bytes.size() - offset);
             if (!WriteFile(handle_, bytes.data() + offset, remaining, &written, nullptr) || written == 0) {
-                throw std::runtime_error("serial write failed");
+                throw TransportError("serial write failed");
             }
             offset += written;
         }
@@ -117,7 +122,7 @@ public:
             if (error == ERROR_OPERATION_ABORTED) {
                 return {};
             }
-            throw std::runtime_error("serial read failed");
+            throw TransportError("serial read failed");
         }
         bytes.resize(count);
         return bytes;
@@ -139,7 +144,7 @@ public:
 private:
     void require_open() const {
         if (handle_ == INVALID_HANDLE_VALUE) {
-            throw std::runtime_error("serial port is not open");
+            throw TransportError("serial port is not open");
         }
     }
 
@@ -149,7 +154,7 @@ private:
         timeouts.ReadTotalTimeoutConstant = timeout_ms;
         timeouts.WriteTotalTimeoutConstant = timeout_ms;
         if (!SetCommTimeouts(handle_, &timeouts)) {
-            throw std::runtime_error("SetCommTimeouts failed");
+            throw TransportError("SetCommTimeouts failed");
         }
     }
 
@@ -199,6 +204,11 @@ public:
     HidBridgeCore& operator=(const HidBridgeCore&) = delete;
 
     ~HidBridgeCore() { close(); }
+
+    [[nodiscard]] bool is_open() const {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        return opened_ && !closing_;
+    }
 
     void open() {
         std::lock_guard<std::mutex> state_lock(state_mutex_);

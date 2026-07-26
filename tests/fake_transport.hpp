@@ -68,7 +68,7 @@ public:
             ++write_attempts_;
             if (fail_next_write_) {
                 fail_next_write_ = false;
-                throw std::runtime_error("fake write failure");
+                throw TransportError("fake write failure");
             }
             ++active_writes_;
             max_active_writes_ = std::max(max_active_writes_, active_writes_);
