@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "rp2350_hid_bridge/port_discovery.hpp"
 #include "session_state.hpp"
 
 namespace {
@@ -138,7 +140,8 @@ std::int32_t rp2350_hid_get_abi_info(Rp2350HidAbiInfo* info) {
         info->abi_major = RP2350_HID_ABI_MAJOR;
         info->abi_minor = RP2350_HID_ABI_MINOR;
         info->options_size = sizeof(Rp2350HidOptions);
-        info->feature_flags = RP2350_HID_FEATURE_SHARED_SESSION;
+        info->feature_flags =
+            RP2350_HID_FEATURE_SHARED_SESSION | RP2350_HID_FEATURE_PORT_DISCOVERY;
     });
 }
 
@@ -147,13 +150,26 @@ const char* rp2350_hid_last_error(void) {
 }
 
 std::int32_t rp2350_hid_find_port(
-    std::uint16_t,
-    std::uint16_t,
-    char*,
-    std::uint32_t) {
-    return call_api([] {
-        throw std::runtime_error("port discovery is not available in this build");
+    std::uint16_t vid,
+    std::uint16_t pid,
+    char* output,
+    std::uint32_t output_size) {
+    std::int32_t result = RP2350_HID_STATUS_OK;
+    const std::int32_t status = call_api([&] {
+        const std::string port = rp2350_hid_bridge::detail::find_windows_com_port(vid, pid);
+        if (port.empty()) {
+            return;
+        }
+        if (output == nullptr) {
+            throw std::invalid_argument("port output buffer is null");
+        }
+        if (output_size < port.size() + 1) {
+            throw std::runtime_error("port output buffer is too small");
+        }
+        std::memcpy(output, port.c_str(), port.size() + 1);
+        result = RP2350_HID_STATUS_FOUND;
     });
+    return status == RP2350_HID_STATUS_OK ? result : status;
 }
 
 std::int32_t rp2350_hid_session_create(

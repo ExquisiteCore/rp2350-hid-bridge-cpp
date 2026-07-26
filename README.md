@@ -1,9 +1,10 @@
 # RP2350 HID 桥接器 C++ SDK
 
-面向 ExquisiteCore RP2350 KeyMouse Bridge 的仅头文件 C++17 SDK。
+面向 ExquisiteCore RP2350 KeyMouse Bridge 的 C++17 共享库 SDK。
 
-该 SDK 实现了串口帧协议、按键解析器、脚本解析器和 Windows 串口客户端。C++ 视觉
-运行时通过它向 RP2350 板卡发送相对鼠标移动和可选的按键命令。
+`rp2350_hid_bridge.dll` 唯一管理串口、心跳、序列号和请求/响应锁；公开 C ABI 提供
+稳定的不透明会话句柄，C++ `HidSession` 是该 C ABI 的 RAII 薄包装。C++ 视觉运行时
+和调用端可以保留同一个会话，而不会重复打开 COM 口。
 
 > 首次接入项目时，请阅读 [C++ SDK 详细接入指南](INTEGRATION.md)。指南包含安全的连通测试、完整应用模板、错误恢复和会话生命周期说明。
 
@@ -40,6 +41,8 @@ ctest --test-dir build -C Release --output-on-failure
 构建产物：
 
 ```text
+build\Release\rp2350_hid_bridge.dll
+build\Release\rp2350_hid_bridge.lib
 build\Release\test_protocol.exe
 build\Release\basic_example.exe
 build\Release\script_example.exe
@@ -57,11 +60,20 @@ add_subdirectory(path/to/rp2350-hid-bridge-cpp)
 target_link_libraries(your_app PRIVATE rp2350_hid_bridge)
 ```
 
-作为手动包含的仅头文件 SDK：
+使用预构建产物时，添加头文件目录、链接导入库，并把 DLL 部署在 EXE 同级目录：
 
 ```cmake
 target_include_directories(your_app PRIVATE path/to/rp2350-hid-bridge-cpp/include)
 target_compile_features(your_app PRIVATE cxx_std_17)
+target_link_libraries(
+    your_app
+    PRIVATE path/to/rp2350-hid-bridge-cpp/build/Release/rp2350_hid_bridge.lib
+)
+```
+
+```text
+your_app.exe
+rp2350_hid_bridge.dll
 ```
 
 ## 头文件结构
@@ -78,7 +90,8 @@ target_compile_features(your_app PRIVATE cxx_std_17)
 #include "rp2350_hid_bridge/protocol.hpp"
 #include "rp2350_hid_bridge/keys.hpp"
 #include "rp2350_hid_bridge/script.hpp"
-#include "rp2350_hid_bridge/serial.hpp"
+#include "rp2350_hid_bridge/c_api.h"
+#include "rp2350_hid_bridge/client.hpp"
 ```
 
 ## 直接控制 API
@@ -87,7 +100,7 @@ target_compile_features(your_app PRIVATE cxx_std_17)
 #include "rp2350_hid_bridge.hpp"
 
 int main() {
-    rp2350_hid_bridge::HidBridge hid("COM3");
+    rp2350_hid_bridge::HidSession hid("COM3");
     hid.open();
 
     hid.ping();
@@ -128,7 +141,7 @@ const char* script =
     "wait 100\n"
     "stop\n";
 
-rp2350_hid_bridge::HidBridge hid("COM3");
+rp2350_hid_bridge::HidSession hid("COM3");
 hid.open();
 hid.run_script(script);
 ```
@@ -186,8 +199,8 @@ auto packet = script_command_to_packet(commands.front());
 传输余量；文本输入与拆分后的鼠标移动使用估算的 HID 执行时长；`BATCH_END` 还包含
 该批处理累计的执行时长。
 
-`HidBridge` 支持注入 `SerialTransport`，从而无需 COM 端口或 HID 硬件即可进行
-确定性测试。使用普通端口构造函数时，会自动选择随附的 `Win32SerialTransport`。
+新代码建议使用 `HidSession`；`HidBridge` 是兼容旧源码的类型别名。公开对象不暴露
+内部串口传输状态，协议和传输的确定性测试在共享库内部完成。
 
 ## 协议 v2 安全租约
 
@@ -197,15 +210,14 @@ DTR。进程、串口连接或心跳中断后，固件的两秒控制租约会�
 
 ## 并发与会话生命周期
 
-所有命令和脚本共用一个递归命令互斥锁，因此同一时间只会有一个请求/响应交换，普通
-命令也无法插入脚本事务。`run_script()` 会记录当前会话代次，并在每个批处理片段中
-持续检查。关闭或重新打开桥接器时，旧的排队脚本会被中止，其剩余命令不会通过新连接
-继续发送。
+一个原生会话的所有命令和脚本共用命令锁，因此同一时间只会有一个请求/响应交换，
+普通命令也无法插入脚本事务。同一个会话可由多个调用线程提交命令；调用顺序仍应由
+业务层定义。不要在命令仍运行时销毁最后一个会话所有者。
 
-`close()` 会将桥接器标记为正在关闭、使当前会话代次失效、停止后续心跳写入、取消
-正在进行的读取或 `BUSY` 延迟，并尽力抢先写入一次 `STOP_ALL`。随后它会等待心跳
-工作线程结束，等待所有活动命令退出传输层，再取消 DTR 并关闭端口。该顺序可防止
-停止后继续写入命令或心跳，也可避免旧会话影响后续重新打开的连接。
+`HidSession::close()` 只释放当前 C++ 对象拥有的一个原生引用。如果仍有视觉运行时等
+其他所有者，会话、心跳和已保持的键盘状态继续存在；最后一个引用释放时才会尽力发送
+一次 `STOP_ALL`、等待心跳和活动命令退出、取消 DTR 并关闭端口。需要立即全局释放时
+必须显式调用 `stop_all()`。
 
 ## 注意事项
 

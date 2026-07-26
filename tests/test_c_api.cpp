@@ -8,6 +8,8 @@
 #include <vector>
 
 #include "rp2350_hid_bridge/c_api.h"
+#include "rp2350_hid_bridge/client.hpp"
+#include "rp2350_hid_bridge/port_discovery.hpp"
 #include "../src/session_state.hpp"
 #include "fake_transport.hpp"
 
@@ -51,13 +53,35 @@ void test_abi_info() {
     CHECK(info.abi_minor == 0);
     CHECK(info.options_size == sizeof(Rp2350HidOptions));
     CHECK((info.feature_flags & RP2350_HID_FEATURE_SHARED_SESSION) != 0);
-    CHECK((info.feature_flags & RP2350_HID_FEATURE_PORT_DISCOVERY) == 0);
+    CHECK((info.feature_flags & RP2350_HID_FEATURE_PORT_DISCOVERY) != 0);
 
     char port[32]{};
     CHECK(
-        rp2350_hid_find_port(0x2E8A, 0x000A, port, sizeof(port)) ==
-        RP2350_HID_STATUS_ERROR);
-    CHECK(last_error().find("port discovery is not available") != std::string::npos);
+        rp2350_hid_find_port(0, 0, port, sizeof(port)) ==
+        RP2350_HID_STATUS_OK);
+    CHECK(port[0] == '\0');
+}
+
+void test_port_discovery_parsers() {
+    CHECK(rp2350_hid_bridge::detail::matches_usb_vid_pid(
+        "USB\\VID_CAFE&PID_2350\\ABC", 0xCAFE, 0x2350));
+    CHECK(!rp2350_hid_bridge::detail::matches_usb_vid_pid(
+        "USB\\VID_CAFE&PID_9999\\ABC", 0xCAFE, 0x2350));
+    CHECK(
+        rp2350_hid_bridge::detail::extract_com_port("USB Serial Device (COM4)") ==
+        "COM4");
+    CHECK(
+        rp2350_hid_bridge::detail::extract_com_port("No serial suffix").empty());
+}
+
+void test_cpp_client_is_lazy_and_compatible() {
+    HidSession session(test_options());
+    CHECK(!session.is_open());
+    session.close();
+    session.close();
+
+    HidBridge compatibility(test_options());
+    CHECK(!compatibility.is_open());
 }
 
 void test_unopened_session_can_be_retained_and_released() {
@@ -213,6 +237,8 @@ void test_small_output_buffer_is_an_ordinary_error() {
 int main() {
     try {
         test_abi_info();
+        test_port_discovery_parsers();
+        test_cpp_client_is_lazy_and_compatible();
         test_unopened_session_can_be_retained_and_released();
         test_final_release_performs_one_orderly_shutdown();
         test_transport_failure_faults_session_without_automatic_retry();

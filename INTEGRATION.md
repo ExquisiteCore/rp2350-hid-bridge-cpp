@@ -40,7 +40,7 @@ CMake 3.20+
 Git（推荐，用于子模块或源码依赖）
 ```
 
-SDK 是仅头文件 C++17 库。协议、按键和脚本解析代码可以在其他平台编译，但 SDK 默认提供的真实串口传输层使用 Win32 API，因此直接连接板卡时需要 Windows。非 Windows 平台只有在应用自行注入 `SerialTransport` 实现时才能连接真实设备；本文不展开自定义传输层。
+SDK 由公开头文件、`rp2350_hid_bridge.lib` 导入库和 `rp2350_hid_bridge.dll` 组成。协议、按键和脚本解析代码可以在其他平台编译，但默认真实串口传输层使用 Win32 API，因此直接连接板卡时需要 Windows。
 
 ## 3. 构建并接入 SDK
 
@@ -54,7 +54,7 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-`cmake -S . -B build` 不固定生成器，CMake 会根据本机环境选择已安装的编译工具链。`test_protocol` 不需要连接板卡。
+`cmake -S . -B build` 不固定生成器，CMake 会根据本机环境选择已安装的编译工具链。`test_protocol` 不需要连接板卡。构建后应同时得到 `build\Release\rp2350_hid_bridge.dll` 和 `rp2350_hid_bridge.lib`。
 
 ### 方式一：作为 CMake 子目录
 
@@ -79,7 +79,7 @@ add_executable(your_app src/main.cpp)
 target_link_libraries(your_app PRIVATE rp2350_hid_bridge)
 ```
 
-SDK 的 CMake 目标会传递头文件路径、C++17 要求和线程依赖。构建应用：
+SDK 的 CMake 目标会传递头文件路径、C++17 要求和共享库链接依赖。作为父项目子目录时默认不构建 SDK 自身的示例和测试。构建应用：
 
 ```powershell
 cmake -S . -B build
@@ -93,25 +93,29 @@ git submodule add https://github.com/ExquisiteCore/rp2350-hid-bridge-cpp.git thi
 git submodule update --init --recursive
 ```
 
-### 方式二：手动引用头文件
+### 方式二：使用预构建共享库
 
-不使用 SDK 自带 CMake 目标时，显式添加头文件目录、C++17 和线程依赖：
+不使用 SDK 自带 CMake 目标时，显式添加头文件目录并链接导入库：
 
 ```cmake
-find_package(Threads REQUIRED)
-
 add_executable(your_app src/main.cpp)
 target_include_directories(
     your_app
     PRIVATE third_party/rp2350_hid_bridge_cpp/include
 )
 target_compile_features(your_app PRIVATE cxx_std_17)
-target_link_libraries(your_app PRIVATE Threads::Threads)
+target_link_libraries(
+    your_app
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rp2350_hid_bridge_cpp/build/Release/rp2350_hid_bridge.lib
+)
 
 if(MSVC)
     target_compile_options(your_app PRIVATE /utf-8)
 endif()
 ```
+
+发布时必须把 `rp2350_hid_bridge.dll` 放在 `your_app.exe` 同级目录。只复制头文件或
+只链接 `.lib` 都不足以运行。
 
 应用代码通常只需要总入口头文件：
 
@@ -181,7 +185,7 @@ int main(int argc, char** argv) {
         options.timeout_ms = 1000;
         options.retries = 2;
 
-        rp2350_hid_bridge::HidBridge hid(options);
+        rp2350_hid_bridge::HidSession hid(options);
         hid.open();
         hid.ping();
 
@@ -258,7 +262,7 @@ cmake --build build --config Release
 | `wait_ms(milliseconds)` | 让设备等待 | 非负 32 位毫秒数 |
 | `stop_all()` | 释放所有保持中的键和鼠标按钮 | 成功、失败和退出路径都应尝试调用 |
 | `run_script(text)` | 串行执行脚本 | 详见第 7 节 |
-| `close()` | 停止会话并关闭端口 | `noexcept`，会尽力发送 `STOP_ALL` |
+| `close()` | 释放当前对象的一个原生会话引用 | `noexcept`；只有最后引用才全局停止并关闭端口 |
 
 按键名不区分大小写，常用名称包括：
 
@@ -358,7 +362,7 @@ void run_input(const std::string& port) {
     options.retries = 2;
     options.heartbeat_interval_ms = 500;
 
-    rp2350_hid_bridge::HidBridge hid(options);
+    rp2350_hid_bridge::HidSession hid(options);
     hid.open();
     try {
         std::cout << "warning: real HID input is enabled; verify the active window\n";
@@ -455,17 +459,19 @@ SDK 只对响应超时和 `BUSY` 进行配置次数内的重试。`NACK`、串�
 
 ### 并发规则
 
-- 同一个 `HidBridge` 的普通命令和脚本事务通过递归命令互斥锁串行执行。
+- 同一个原生 `HidSession` 的普通命令和脚本事务通过命令锁串行执行，可以从多个调用线程提交。
 - 心跳与命令共享写入互斥锁，不会与命令字节交叉写入。
 - 不要为同一个 COM 口创建两个客户端；Windows 串口独占和固件 `BUSY` 都可能导致失败。
 - 可以从多个线程提交命令，但需要由应用定义顺序。对顺序敏感的一组操作应使用单一工作队列或 `run_script()`。
-- 对象析构开始后，其他线程不得继续访问该对象；应用必须保证调用线程先结束，再销毁 `HidBridge`。
+- `HidBridge` 只是 `HidSession` 的旧名兼容别名；新代码使用 `HidSession`。
+- 一个 COM 口只创建一个原生会话。其他组件通过 retain/attach 共用句柄，不再独立打开串口。
+- 对象析构开始后，其他线程不得继续访问该对象；应用必须保证调用线程先结束，再销毁 `HidSession`。
 
 ### 会话代次
 
 每次成功 `open()` 都创建新的会话代次。`close()` 或重新打开会使旧代次失效。排队中的旧脚本会检查代次并中止，剩余命令不会通过新连接继续发送；旧响应也不能满足新会话中的请求。
 
-`close()` 的主要顺序是：
+`close()` 先释放当前对象拥有的一个引用。如果这是最后引用，DLL 才执行：
 
 1. 标记对象正在关闭，并使当前会话代次失效。
 2. 停止后续心跳并取消正在进行的读取或 `BUSY` 等待。
@@ -499,7 +505,7 @@ try {
 }
 ```
 
-`HidBridge` 析构函数会调用 `close()`，所以正常栈展开还有 RAII 兜底。但析构和 `close()` 不是进程崩溃、强制结束、系统掉电或 USB 瞬断时的绝对保证。在这些情况下，最终保护来自固件的两秒控制租约以及 DTR/USB 断开触发的安全重置。
+`HidSession` 析构函数会调用 `close()`，`HidBridge` 兼容名具有相同行为。正常栈展开有 RAII 兜底，但析构和 `close()` 不是进程崩溃、强制结束、系统掉电或 USB 瞬断时的绝对保证。在这些情况下，最终保护来自固件的两秒控制租约以及 DTR/USB 断开触发的安全重置。
 
 对于服务或长期运行程序，还应：
 

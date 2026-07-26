@@ -729,6 +729,4 @@ private:
 
 }  // namespace detail
 
-using HidBridge = detail::HidBridgeCore;
-
 }  // namespace rp2350_hid_bridge

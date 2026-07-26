@@ -4,4 +4,5 @@
 #include "rp2350_hid_bridge/protocol.hpp"
 #include "rp2350_hid_bridge/keys.hpp"
 #include "rp2350_hid_bridge/script.hpp"
-#include "rp2350_hid_bridge/serial.hpp"
+#include "rp2350_hid_bridge/c_api.h"
+#include "rp2350_hid_bridge/client.hpp"
